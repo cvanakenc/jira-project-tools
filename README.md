@@ -1,13 +1,13 @@
 # Jira Project Tools
 
-Deterministic scripts for managing Jira projects — create and close/archive — following The Kind Kids' Handbook (Confluence).
+Deterministic scripts for managing Jira projects — provision and archive — following The Kind Kids' Handbook (Confluence).
 
 ## Scripts
 
 | Script | What it does |
 |--------|-------------|
-| `tools/close_project.py` | Archive a Jira project by applying the `Archived Scheme / STATIK` permission scheme |
-| `tools/create_project.py` | Create a company-managed Kanban project, sharing settings from INTSTA |
+| `tools/provision.py` | Full project setup: creates Kanban project, copies INTSTA schemes, sets category + lead, and (optionally) creates Tempo accounts + sets default |
+| `tools/close_project.py` | Archive a project: checks unresolved issues, applies `Archived Scheme / STATIK`, verifies |
 
 ## Prerequisites
 
@@ -20,35 +20,15 @@ API tokens: https://id.atlassian.com/manage-profile/security/api-tokens
 
 ## Usage
 
-### Close (archive) a project
+### Provision a project
 
 ```bash
-python3 tools/close_project.py SHICLA
-python3 tools/close_project.py SHICLA --dry-run
-python3 tools/close_project.py SHICLA --force  # skip unresolved-issues check
-```
-
-**Process:**
-1. Verifies project exists
-2. Checks current permission scheme (skips if already archived)
-3. Counts unresolved issues (fails if > 0, unless `--force`)
-4. Applies `Archived Scheme / STATIK` permission scheme
-5. Verifies the change
-
-### Create a project
-
-```bash
-python3 tools/create_project.py WOOWEB "Website WooCommerce" \
+python3 tools/provision.py SHICLA "The Belgian Alliance for Climate Action" \
   --pm-email "lore@statik.be" \
   --category "Panda / Craft"
-
-python3 tools/create_project.py WOOWEB "Website WooCommerce" \
-  --pm-email "lore@statik.be" \
-  --category "Panda / Craft" \
-  --dry-run
 ```
 
-**Process:**
+**What it does (Phase 1 — Jira):**
 1. Looks up project lead by email
 2. Looks up project category by name
 3. Fetches INTSTA permission + notification schemes
@@ -57,23 +37,43 @@ python3 tools/create_project.py WOOWEB "Website WooCommerce" \
 6. Sets category
 7. Verifies everything
 
-### What remains MANUAL after creation
+**What it asks YOU to do (Phase 2 — Tempo):**
+- Explicitly lists every manual step with URLs, customer key, and account naming
+- If `--tempo-token` is provided, auto-creates Voortraject + Implementatie accounts and sets the default
 
-| Step | Who |
-|------|-----|
-| Create project in Fichenbak | Strategist |
-| Fill Google Sheet request | Strategist |
-| Notify `#nieuweprojecten` | Anyone |
-| Create Tempo Customer | Luk / Leen |
-| Create Tempo Accounts (Voortraject / Implementatie) | PM |
-| Set Default Account in Jira | PM |
-| Run Automation on Epics (lightning bolt) | PM |
-| Fill PO, GL, max budget in Fichenbak | Strategist |
+```bash
+# With Tempo auto-creation:
+python3 tools/provision.py SHICLA "The Belgian Alliance for Climate Action" \
+  --pm-email "lore@statik.be" \
+  --category "Panda / Craft" \
+  --tempo-token "t8r8y9Ql..."
+```
+
+### Close a project
+
+```bash
+python3 tools/close_project.py SHICLA
+python3 tools/close_project.py SHICLA --dry-run
+python3 tools/close_project.py SHICLA --force  # skip unresolved-issues check
+```
+
+## Full checklist after provision
+
+```
+[ ] Strategist: project exists in Fichenbak + Google Sheet
+[ ] Slack: notified #nieuweprojecten
+[ ] Leen/Luk: Tempo Customer created
+[ ] PM: Tempo Accounts created (Voortraject + Implementatie)
+[ ] PM: Default Account set in Jira Project Settings
+[ ] PM: Epics created + Automation run
+[ ] Strategist: PO, GL, max budget filled in Fichenbak
+[ ] PM: notify strategist that Jira is ready
+```
 
 ## Reference
 
 Based on [The Kind Kids' Handbook → Jira & Tempo](https://statik.atlassian.net/wiki/spaces/INTHAN/pages/121438257/Jira+Tempo) (Confluence).
 
 Key pages:
-- [Een nieuw project maken in JIRA](https://statik.atlassian.net/wiki/spaces/INTHAN/pages/1736706)
+- [Een nieuw project maken](https://statik.atlassian.net/wiki/spaces/INTHAN/pages/1736706)
 - [Een project afsluiten](https://statik.atlassian.net/wiki/spaces/INTHAN/pages/1589346316)
