@@ -42,7 +42,7 @@ except ImportError:
 JIRA_BASE    = "https://statik.atlassian.net"
 TEMPO_BASE   = "https://api.tempo.io/4"
 INTSTA_KEY   = "INTSTA"
-KANBAN_TMPL  = "com.pyxis.greenhopper.jira:gh-kanban"
+KANBAN_TMPL  = "com.pyxis.greenhopper.jira:gh-kanban-template"
 
 # ── helpers ──────────────────────────────────────────────────────────────
 
@@ -150,15 +150,16 @@ def jira_apply_perm_scheme(key, scheme_id, at_email, at_token, dry_run):
 
 def jira_apply_notif_scheme(key, scheme_id, at_email, at_token, dry_run):
     if not scheme_id or dry_run: return
-    code, data = jira("PUT", f"/project/{key}/notificationscheme",
-                      body={"id": scheme_id}, email=at_email, token=at_token)
+    code, data = jira("PUT", f"/project/{key}",
+                      body={"notificationScheme": int(scheme_id)},
+                      email=at_email, token=at_token)
     if code != 200:
         warn(f"Notification scheme failed: HTTP {code} — continuing anyway")
 
 def jira_set_category(key, cat_id, at_email, at_token, dry_run):
     if dry_run: return
     code, data = jira("PUT", f"/project/{key}",
-                      body={"projectCategoryId": cat_id},
+                      body={"categoryId": int(cat_id)},
                       email=at_email, token=at_token)
     if code != 200:
         bail(f"Set category failed: {data.get('errorMessages', data)}")
@@ -169,19 +170,22 @@ def jira_verify(key, expected_name, at_email, at_token):
 
 # ── Tempo account actions ────────────────────────────────────────────────
 
-def tempo_create_account(name, key_suffix, customer_key, category_id,
+def tempo_create_account(name, key_suffix, customer_key, category_key,
                           lead_id, tempo_token, dry_run):
     """Create a Tempo account. Returns account dict or None."""
     if dry_run:
         return {"key": f"{key_suffix}", "id": 99999, "name": name}
 
+    # Tempo v4 POST /accounts expects FLAT fields (leadAccountId / categoryKey /
+    # customerKey), not the nested objects returned by GET. Nested objects yield
+    # "No lead supplied".
     body = {
         "name": name,
         "key": key_suffix,
         "status": "OPEN",
-        "category": {"id": category_id},
-        "customer": {"key": customer_key},
-        "lead": {"accountId": lead_id},
+        "categoryKey": category_key,
+        "customerKey": customer_key,
+        "leadAccountId": lead_id,
     }
     code, data = tempo("POST", "accounts", body=body, bearer=tempo_token)
     if code not in (200, 201):
@@ -190,14 +194,14 @@ def tempo_create_account(name, key_suffix, customer_key, category_id,
     return data
 
 def tempo_find_category(name, tempo_token):
-    """Look up Tempo account category ID by name."""
+    """Look up a Tempo account category KEY by name (e.g. 'Volgens Offerte' → 'VOF')."""
     code, data = tempo("GET", f"account-categories?query={urllib.request.quote(name)}",
                        bearer=tempo_token)
     if code != 200:
         return None
     for c in (data if isinstance(data, list) else data.get("results", [])):
         if c.get("name", "").lower() == name.lower():
-            return c["id"]
+            return c["key"]
     return None
 
 def jira_set_default_account(project_key, account_key, at_email, at_token, dry_run):
@@ -236,19 +240,25 @@ DEFAULT_CATEGORY = "Volgens Offerte"  # Tempo account categorie
 
 def provision(key: str, name: str, pm_email: str, category: str,
               at_email: str = "", at_token: str = "",
-              tempo_token: str = "",
+              tempo_token: str = "", customer_key: str = "",
+              no_tempo: bool = False,
               dry_run: bool = False) -> bool:
 
     at_email = at_email or os.environ.get("ATLASSIAN_EMAIL", "")
     at_token = at_token or os.environ.get("ATLASSIAN_API_TOKEN", "")
-    tempo_token = tempo_token or os.environ.get("TEMPO_API_TOKEN", "")
+    # --no-tempo forces a Jira-only run even when TEMPO_API_TOKEN is exported
+    # (the creds file always exports it, so env presence != intent to use it).
+    tempo_token = "" if no_tempo else (tempo_token or os.environ.get("TEMPO_API_TOKEN", ""))
 
     if not at_email or not at_token:
         print("❌ Set ATLASSIAN_EMAIL and ATLASSIAN_API_TOKEN")
         return False
 
     key = key.upper()
-    customer_key = key[:6]  # Tempo customer key = project prefix
+    # Tempo customer key = Fichenbak clientId (a short, usually 3-letter code),
+    # NOT the project-key prefix. Pass it explicitly via --customer-key; only
+    # fall back to the prefix heuristic when nothing is supplied.
+    customer_key = (customer_key or key[:6]).upper()
     has_tempo = bool(tempo_token)
 
     mode = "[DRY-RUN] " if dry_run else ""
@@ -331,14 +341,14 @@ def provision(key: str, name: str, pm_email: str, category: str,
     else:
         print(f"\n      Tempo token detected — auto-creating accounts...\n")
 
-        # Find Tempo account category
-        tempo_cat_id = 2  # default: 2 = "Volgens Offerte" (common default)
+        # Find Tempo account category KEY ("Volgens Offerte" → "VOF")
+        tempo_cat_key = "VOF"  # default key for "Volgens Offerte"
         found_cat = tempo_find_category(DEFAULT_CATEGORY, tempo_token)
         if found_cat:
-            tempo_cat_id = found_cat
-            print(f"      Tempo category '{DEFAULT_CATEGORY}' → id={tempo_cat_id}")
+            tempo_cat_key = found_cat
+            print(f"      Tempo category '{DEFAULT_CATEGORY}' → key={tempo_cat_key}")
         else:
-            warn(f"Tempo category '{DEFAULT_CATEGORY}' not found, using id=2")
+            warn(f"Tempo category '{DEFAULT_CATEGORY}' not found, using key=VOF")
 
         accounts_created = []
         for acct_name, suffix in [("Voortraject", f"{key}VTJ"),
@@ -347,7 +357,7 @@ def provision(key: str, name: str, pm_email: str, category: str,
                 name=acct_name,
                 key_suffix=suffix,
                 customer_key=customer_key,
-                category_id=tempo_cat_id,
+                category_key=tempo_cat_key,
                 lead_id=lead_id,
                 tempo_token=tempo_token,
                 dry_run=dry_run,
@@ -415,6 +425,8 @@ if __name__ == "__main__":
     p.add_argument("--email", default="", help="Atlassian account email")
     p.add_argument("--token", default="", help="Atlassian API token")
     p.add_argument("--tempo-token", default="", help="Tempo API token (optional: auto-creates Tempo accounts)")
+    p.add_argument("--customer-key", default="", help="Tempo customer key / Fichenbak clientId (e.g. 'SUI'). Defaults to first 6 chars of project key.")
+    p.add_argument("--no-tempo", action="store_true", help="Jira only: skip Tempo even if TEMPO_API_TOKEN is set (PM creates accounts manually)")
     p.add_argument("--dry-run", action="store_true", help="Validate without creating")
     args = p.parse_args()
 
@@ -422,7 +434,8 @@ if __name__ == "__main__":
         key=args.key.upper(), name=args.name,
         pm_email=args.pm_email, category=args.category,
         at_email=args.email, at_token=args.token,
-        tempo_token=args.tempo_token,
+        tempo_token=args.tempo_token, customer_key=args.customer_key,
+        no_tempo=args.no_tempo,
         dry_run=args.dry_run,
     )
     sys.exit(0 if ok else 1)
