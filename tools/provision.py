@@ -40,6 +40,8 @@ except ImportError:
     _SSL_CONTEXT = ssl._create_unverified_context()
 
 JIRA_BASE    = "https://statik.atlassian.net"
+AGILE_BASE   = "https://statik.atlassian.net/rest/agile/1.0"
+GH_BASE      = "https://statik.atlassian.net/rest/greenhopper/1.0"
 TEMPO_BASE   = "https://api.tempo.io/4"
 INTSTA_KEY   = "INTSTA"
 KANBAN_TMPL  = "com.pyxis.greenhopper.jira:gh-kanban-template"
@@ -48,10 +50,13 @@ KANBAN_TMPL  = "com.pyxis.greenhopper.jira:gh-kanban-template"
 
 def api(base: str, method: str, path: str,
         body: dict | None = None, params: dict | None = None,
-        email: str = "", token: str = "", bearer: str = "") -> tuple[int, dict]:
+        email: str = "", token: str = "", bearer: str = "",
+        extra_headers: dict | None = None) -> tuple[int, dict]:
     url = f"{base}/rest/api/3/{path.lstrip('/')}" if base == JIRA_BASE \
          else f"{base}/{path.lstrip('/')}"
     headers = {"Accept": "application/json"}
+    if extra_headers:
+        headers.update(extra_headers)
     if bearer:
         headers["Authorization"] = f"Bearer {bearer}"
     elif email and token:
@@ -123,6 +128,22 @@ def get_intsta_notif_scheme(at_email, at_token):
         return ""
     return data["id"]
 
+def get_intsta_workflow_scheme(at_email, at_token):
+    """INTSTA's workflow scheme ('STATIK / Classic Default Workflow Scheme').
+
+    Its initial status is New — the Kanban template's own generated workflow
+    starts issues in Backlog instead, which is not what we want.
+    """
+    code, proj = jira("GET", f"/project/{INTSTA_KEY}", email=at_email, token=at_token)
+    if code != 200:
+        return "", ""
+    code, data = jira("GET", f"/workflowscheme/project?projectId={proj['id']}",
+                      email=at_email, token=at_token)
+    if code != 200 or not data.get("values"):
+        return "", ""
+    ws = data["values"][0]["workflowScheme"]
+    return str(ws["id"]), ws.get("name", "")
+
 # ── Jira project actions ─────────────────────────────────────────────────
 
 def jira_create_project(key, name, lead_id, at_email, at_token, dry_run):
@@ -155,6 +176,95 @@ def jira_apply_notif_scheme(key, scheme_id, at_email, at_token, dry_run):
                       email=at_email, token=at_token)
     if code != 200:
         warn(f"Notification scheme failed: HTTP {code} — continuing anyway")
+
+def jira_apply_workflow_scheme(project_id, scheme_id, at_email, at_token, dry_run):
+    """Assign a shared workflow scheme. Only works while the project is empty —
+    Jira rejects this with 'Only empty projects can have workflow schemes
+    assigned' once issues exist, so it has to happen right after creation.
+
+    Heads-up: this is the SHARED scheme, used by ~586 projects. That is the
+    Statik convention (and how the project gets New instead of Backlog as its
+    initial status), but it also means Project settings -> Workflows in this
+    project edits the workflow of every other project, with no warning from
+    Jira. On 2026-08-13 that removed Testing/Selected/Approved/To Analyse/
+    More input instance-wide and force-migrated ~3600 issues. Use
+    --skip-workflow if you want the project isolated instead.
+    """
+    if dry_run or not scheme_id:
+        return False
+    code, data = jira("PUT", "/workflowscheme/project",
+                      body={"workflowSchemeId": str(scheme_id),
+                            "projectId": str(project_id)},
+                      email=at_email, token=at_token)
+    if code not in (200, 204):
+        warn(f"Workflow scheme failed: HTTP {code} — {data.get('errorMessages', data)}")
+        print("       → New issues will start in Backlog instead of New.")
+        return False
+    return True
+
+def find_board(key, at_email, at_token):
+    code, data = api(AGILE_BASE, "GET", f"board?projectKeyOrId={key}",
+                     email=at_email, token=at_token)
+    if code != 200 or not data.get("values"):
+        return None
+    return data["values"][0]["id"]
+
+def get_board_columns(board_id, at_email, at_token):
+    code, data = api(AGILE_BASE, "GET", f"board/{board_id}/configuration",
+                     email=at_email, token=at_token)
+    if code != 200:
+        return None
+    return [(c["name"], [s["id"] for s in c["statuses"]])
+            for c in data["columnConfig"]["columns"]]
+
+def jira_mirror_board_columns(key, at_email, at_token, dry_run):
+    """Copy INTSTA's board column layout onto the new project's board.
+
+    Swapping the workflow scheme leaves the generated board mapped to statuses
+    the new workflow doesn't have (Selected for Development, Done), so issues in
+    the real statuses become invisible. Board columns aren't writable through the
+    public Agile API — this uses the internal greenhopper endpoint.
+    """
+    if dry_run:
+        return False
+
+    src = find_board(INTSTA_KEY, at_email, at_token)
+    dst = find_board(key, at_email, at_token)
+    if not src or not dst:
+        warn("Board not found — column mapping skipped.")
+        return False
+
+    layout = get_board_columns(src, at_email, at_token)
+    if not layout:
+        warn("Could not read INTSTA board columns — mapping skipped.")
+        return False
+
+    # The generated Kanban board has a backlog column (no statuses); INTSTA's
+    # doesn't. Keep ours and append INTSTA's columns after it.
+    current = get_board_columns(dst, at_email, at_token) or []
+    has_kanplan = bool(current and not current[0][1])
+
+    mapped = []
+    if has_kanplan:
+        mapped.append({"name": "Backlog", "mappedStatuses": [],
+                       "min": "", "max": "", "isKanPlanColumn": True})
+    for name, statuses in layout:
+        if not statuses:      # INTSTA's own backlog column, if it ever gains one
+            continue
+        mapped.append({"name": name,
+                       "mappedStatuses": [{"id": s} for s in statuses],
+                       "min": "", "max": "", "isKanPlanColumn": False})
+
+    code, data = api(GH_BASE, "PUT", "rapidviewconfig/columns",
+                     body={"currentStatisticsField": {"id": "issueCount_"},
+                           "rapidViewId": dst, "mappedColumns": mapped},
+                     email=at_email, token=at_token,
+                     extra_headers={"X-Atlassian-Token": "no-check"})
+    if code != 200:
+        warn(f"Board columns failed: HTTP {code}")
+        print(f"       → Map them manually: board {dst} → Settings → Columns")
+        return False
+    return True
 
 def jira_set_category(key, cat_id, at_email, at_token, dry_run):
     if dry_run: return
@@ -241,7 +351,7 @@ DEFAULT_CATEGORY = "Volgens Offerte"  # Tempo account categorie
 def provision(key: str, name: str, pm_email: str, category: str,
               at_email: str = "", at_token: str = "",
               tempo_token: str = "", customer_key: str = "",
-              no_tempo: bool = False,
+              no_tempo: bool = False, skip_workflow: bool = False,
               dry_run: bool = False) -> bool:
 
     at_email = at_email or os.environ.get("ATLASSIAN_EMAIL", "")
@@ -282,8 +392,14 @@ def provision(key: str, name: str, pm_email: str, category: str,
     print("3. Fetching INTSTA schemes...")
     perm_id = get_intsta_perm_scheme(at_email, at_token)
     notif_id = get_intsta_notif_scheme(at_email, at_token)
+    wf_id, wf_name = ("", "") if skip_workflow \
+        else get_intsta_workflow_scheme(at_email, at_token)
     print(f"   ✓ Permission scheme id={perm_id}"
           + (f", Notification scheme id={notif_id}" if notif_id else ""))
+    if wf_id:
+        print(f"   ✓ Workflow scheme id={wf_id} ({wf_name})")
+    elif not skip_workflow:
+        warn("INTSTA workflow scheme not found — issues will start in Backlog.")
 
     print("4. Creating project...")
     proj = jira_create_project(key, name, lead_id, at_email, at_token, dry_run)
@@ -296,6 +412,14 @@ def provision(key: str, name: str, pm_email: str, category: str,
     if notif_id:
         jira_apply_notif_scheme(key, notif_id, at_email, at_token, dry_run)
         print("   ✓ Notification scheme applied")
+    if wf_id:
+        # Must run before anyone files an issue — see jira_apply_workflow_scheme.
+        if jira_apply_workflow_scheme(pid, wf_id, at_email, at_token, dry_run):
+            print("   ✓ Workflow scheme applied (new issues start in 'New')")
+            if jira_mirror_board_columns(key, at_email, at_token, dry_run):
+                print("   ✓ Board columns mirrored from INTSTA")
+        elif dry_run:
+            print("   [DRY-RUN] Workflow scheme + board columns skipped")
 
     print("6. Setting category...")
     jira_set_category(key, cat_id, at_email, at_token, dry_run)
@@ -427,6 +551,7 @@ if __name__ == "__main__":
     p.add_argument("--tempo-token", default="", help="Tempo API token (optional: auto-creates Tempo accounts)")
     p.add_argument("--customer-key", default="", help="Tempo customer key / Fichenbak clientId (e.g. 'SUI'). Defaults to first 6 chars of project key.")
     p.add_argument("--no-tempo", action="store_true", help="Jira only: skip Tempo even if TEMPO_API_TOKEN is set (PM creates accounts manually)")
+    p.add_argument("--skip-workflow", action="store_true", help="Keep Jira's generated Kanban workflow (issues start in Backlog) instead of INTSTA's")
     p.add_argument("--dry-run", action="store_true", help="Validate without creating")
     args = p.parse_args()
 
@@ -435,7 +560,7 @@ if __name__ == "__main__":
         pm_email=args.pm_email, category=args.category,
         at_email=args.email, at_token=args.token,
         tempo_token=args.tempo_token, customer_key=args.customer_key,
-        no_tempo=args.no_tempo,
+        no_tempo=args.no_tempo, skip_workflow=args.skip_workflow,
         dry_run=args.dry_run,
     )
     sys.exit(0 if ok else 1)
