@@ -45,6 +45,8 @@ GH_BASE      = "https://statik.atlassian.net/rest/greenhopper/1.0"
 TEMPO_BASE   = "https://api.tempo.io/4"
 INTSTA_KEY   = "INTSTA"
 KANBAN_TMPL  = "com.pyxis.greenhopper.jira:gh-kanban-template"
+# Forge field from the Productive app — holds the Productive budget (deal) id.
+PRODUCTIVE_BUDGET_FIELD = "Productive Budget"
 
 # ── helpers ──────────────────────────────────────────────────────────────
 
@@ -266,6 +268,156 @@ def jira_mirror_board_columns(key, at_email, at_token, dry_run):
         return False
     return True
 
+def find_field_id(name, at_email, at_token):
+    code, data = jira("GET", "/field", email=at_email, token=at_token)
+    if code != 200:
+        return ""
+    for f in data:
+        if f.get("name", "").lower() == name.lower():
+            return f["id"]
+    return ""
+
+def project_screen_ids(project_id, at_email, at_token):
+    """Every screen reachable from a project, via its issue type screen scheme."""
+    code, data = jira("GET", f"/issuetypescreenscheme/project?projectId={project_id}",
+                      email=at_email, token=at_token)
+    if code != 200 or not data.get("values"):
+        return []
+    itss = data["values"][0]["issueTypeScreenScheme"]["id"]
+    code, data = jira("GET", f"/issuetypescreenscheme/mapping?issueTypeScreenSchemeId={itss}",
+                      email=at_email, token=at_token)
+    if code != 200:
+        return []
+    ss_ids = {str(m["screenSchemeId"]) for m in data.get("values", [])}
+    if not ss_ids:
+        return []
+    qs = "&".join(f"id={i}" for i in sorted(ss_ids))
+    code, data = jira("GET", f"/screenscheme?{qs}&maxResults=100",
+                      email=at_email, token=at_token)
+    if code != 200:
+        return []
+    screens = set()
+    for ss in data.get("values", []):
+        screens.update(str(s) for s in ss.get("screens", {}).values())
+    return sorted(screens)
+
+def jira_add_field_to_screens(key, project_id, field_name,
+                              at_email, at_token, dry_run):
+    """Put a custom field on the project's own screens.
+
+    Company-managed projects created from a template get dedicated screens named
+    '<KEY>: ...'. Anything else is shared with other projects — editing it would
+    change them too, so those are skipped loudly rather than silently touched.
+    """
+    if dry_run:
+        return None
+    field_id = find_field_id(field_name, at_email, at_token)
+    if not field_id:
+        warn(f"Field '{field_name}' not found — add it to {key}'s screens manually.")
+        return False
+    screen_ids = project_screen_ids(project_id, at_email, at_token)
+    if not screen_ids:
+        warn(f"No screens resolved for {key} — add '{field_name}' manually.")
+        return False
+    code, screens = jira("GET", f"/screens?queryString={key}&maxResults=100",
+                         email=at_email, token=at_token)
+    owned = {str(s["id"]) for s in screens.get("values", [])
+             if s.get("name", "").startswith(f"{key}:")} if code == 200 else set()
+    added = 0
+    for sid in screen_ids:
+        if sid not in owned:
+            warn(f"Screen {sid} is shared with other projects — skipped.")
+            continue
+        code, tabs = jira("GET", f"/screens/{sid}/tabs", email=at_email, token=at_token)
+        if code != 200 or not tabs:
+            warn(f"Screen {sid}: cannot list tabs (HTTP {code})")
+            continue
+        tab_id = tabs[0]["id"]
+        code, existing = jira("GET", f"/screens/{sid}/tabs/{tab_id}/fields",
+                              email=at_email, token=at_token)
+        if code == 200 and any(f.get("id") == field_id for f in existing):
+            added += 1
+            continue
+        code, data = jira("POST", f"/screens/{sid}/tabs/{tab_id}/fields",
+                          body={"fieldId": field_id}, email=at_email, token=at_token)
+        if code in (200, 201):
+            added += 1
+        else:
+            warn(f"Screen {sid}: adding '{field_name}' failed (HTTP {code}) — {data}")
+    return added == len(screen_ids)
+
+def jira_epic_type_id(key, at_email, at_token):
+    code, data = jira("GET", f"/issue/createmeta/{key}/issuetypes",
+                      email=at_email, token=at_token)
+    if code != 200:
+        return ""
+    for t in data.get("issueTypes", []):
+        if t.get("name", "").lower() == "epic":
+            return t["id"]
+    return ""
+
+def jira_project_issues(key, at_email, at_token):
+    """Every issue key in the project. Empty right after provisioning."""
+    code, data = api(JIRA_BASE, "GET", "/search/jql",
+                     params={"jql": f"project = {key}", "fields": "summary",
+                             "maxResults": 200},
+                     email=at_email, token=at_token)
+    if code != 200:
+        return []
+    return [(i["key"], i["fields"]["summary"]) for i in data.get("issues", [])]
+
+def jira_create_epics(key, lead_id, budget_id, at_email, at_token, dry_run):
+    """Create the handbook's two standard epics, stamped with the budget.
+
+    The budget goes in at creation time rather than via a follow-up stamp pass:
+    Jira's search index lags issue creation by seconds, so a JQL sweep run
+    immediately afterwards would not see these epics yet.
+    """
+    if dry_run:
+        return []
+    type_id = jira_epic_type_id(key, at_email, at_token)
+    if not type_id:
+        warn(f"No Epic issue type on {key} — create the epics manually.")
+        return []
+    field_id = find_field_id(PRODUCTIVE_BUDGET_FIELD, at_email, at_token)
+    existing = {s for _, s in jira_project_issues(key, at_email, at_token)}
+    created = []
+    for summary in ("Voortraject", "Implementatie"):
+        if summary in existing:
+            print(f"   • Epic '{summary}' already exists — skipped")
+            continue
+        fields = {"project": {"key": key}, "issuetype": {"id": type_id},
+                  "summary": summary,
+                  "assignee": {"id": lead_id}, "reporter": {"id": lead_id}}
+        if field_id and budget_id:
+            fields[field_id] = budget_id
+        code, data = jira("POST", "/issue", body={"fields": fields},
+                          email=at_email, token=at_token)
+        if code in (200, 201):
+            created.append(data["key"])
+        else:
+            warn(f"Epic '{summary}' failed (HTTP {code}) — {data}")
+    return created
+
+def jira_stamp_budget(key, budget_id, at_email, at_token, dry_run):
+    """Set the Productive budget on every issue in the project."""
+    if dry_run:
+        return 0
+    field_id = find_field_id(PRODUCTIVE_BUDGET_FIELD, at_email, at_token)
+    if not field_id:
+        warn(f"Field '{PRODUCTIVE_BUDGET_FIELD}' not found — set the budget manually.")
+        return 0
+    done = 0
+    for issue_key, _ in jira_project_issues(key, at_email, at_token):
+        code, data = jira("PUT", f"/issue/{issue_key}",
+                          body={"fields": {field_id: budget_id}},
+                          email=at_email, token=at_token)
+        if code in (200, 204):
+            done += 1
+        else:
+            warn(f"{issue_key}: budget not set (HTTP {code}) — {data}")
+    return done
+
 def jira_set_category(key, cat_id, at_email, at_token, dry_run):
     if dry_run: return
     code, data = jira("PUT", f"/project/{key}",
@@ -348,11 +500,47 @@ def jira_set_default_account(project_key, account_key, at_email, at_token, dry_r
 
 DEFAULT_CATEGORY = "Volgens Offerte"  # Tempo account categorie
 
+def backfill_budget(key: str, pm_email: str, budget_id: int,
+                    at_email: str = "", at_token: str = "",
+                    dry_run: bool = False) -> bool:
+    """Apply a Productive budget to a project that already exists.
+
+    The budget is usually created in Productive only after the Jira project is
+    provisioned, so it cannot be passed on the original run.
+    """
+    at_email = at_email or os.environ.get("ATLASSIAN_EMAIL", "")
+    at_token = at_token or os.environ.get("ATLASSIAN_API_TOKEN", "")
+    if not at_email or not at_token:
+        print("❌ Set ATLASSIAN_EMAIL and ATLASSIAN_API_TOKEN")
+        return False
+
+    mode = "[DRY-RUN] " if dry_run else ""
+    print(f"\n{mode}Applying Productive budget {budget_id} to {key}\n")
+
+    code, proj = jira("GET", f"/project/{key}", email=at_email, token=at_token)
+    if code != 200:
+        bail(f"Project {key} not found (HTTP {code})")
+    lead_id = find_user(pm_email, at_email, at_token)
+
+    if dry_run:
+        print(f"   [DRY-RUN] Would stamp every issue in {key} and create missing epics")
+        return True
+
+    if jira_add_field_to_screens(key, proj["id"], PRODUCTIVE_BUDGET_FIELD,
+                                 at_email, at_token, dry_run):
+        print(f"   ✓ '{PRODUCTIVE_BUDGET_FIELD}' present on {key}'s screens")
+    for k in jira_create_epics(key, lead_id, budget_id, at_email, at_token, dry_run):
+        print(f"   ✓ Epic {k} created with budget {budget_id}")
+    stamped = jira_stamp_budget(key, budget_id, at_email, at_token, dry_run)
+    print(f"   ✓ Budget {budget_id} set on {stamped} issue(s)")
+    print(f"\n   {JIRA_BASE}/projects/{key}\n")
+    return True
+
 def provision(key: str, name: str, pm_email: str, category: str,
               at_email: str = "", at_token: str = "",
               tempo_token: str = "", customer_key: str = "",
               no_tempo: bool = False, skip_workflow: bool = False,
-              dry_run: bool = False) -> bool:
+              productive_budget: int = 0, dry_run: bool = False) -> bool:
 
     at_email = at_email or os.environ.get("ATLASSIAN_EMAIL", "")
     at_token = at_token or os.environ.get("ATLASSIAN_API_TOKEN", "")
@@ -420,6 +608,11 @@ def provision(key: str, name: str, pm_email: str, category: str,
                 print("   ✓ Board columns mirrored from INTSTA")
         elif dry_run:
             print("   [DRY-RUN] Workflow scheme + board columns skipped")
+    if dry_run:
+        print("   [DRY-RUN] 'Productive Budget' field skipped")
+    elif jira_add_field_to_screens(key, pid, PRODUCTIVE_BUDGET_FIELD,
+                                   at_email, at_token, dry_run):
+        print(f"   ✓ '{PRODUCTIVE_BUDGET_FIELD}' added to {key}'s screens")
 
     print("6. Setting category...")
     jira_set_category(key, cat_id, at_email, at_token, dry_run)
@@ -432,6 +625,20 @@ def provision(key: str, name: str, pm_email: str, category: str,
         print(f"   ✓ {key} confirmed")
     else:
         warn(f"Verification inconclusive — check manually: {JIRA_BASE}/projects/{key}")
+
+    if productive_budget:
+        print("8. Epics + Productive budget...")
+        if dry_run:
+            print(f"   [DRY-RUN] Epics + budget {productive_budget} skipped")
+        else:
+            stamped = jira_stamp_budget(key, productive_budget,
+                                        at_email, at_token, dry_run)
+            if stamped:
+                print(f"   ✓ Budget {productive_budget} set on {stamped} existing issue(s)")
+            made = jira_create_epics(key, lead_id, productive_budget,
+                                     at_email, at_token, dry_run)
+            for k in made:
+                print(f"   ✓ Epic {k} created with budget {productive_budget}")
 
     # ── Phase 2: Tempo accounts │ default │ Epics ─────────────────
 
@@ -543,17 +750,37 @@ if __name__ == "__main__":
         """),
     )
     p.add_argument("key", help="Project key (e.g., SHICLA)")
-    p.add_argument("name", help="Full project name")
+    p.add_argument("name", nargs="?", default="",
+                   help="Full project name (not needed with --budget-only)")
     p.add_argument("--pm-email", required=True, help="Email of project lead")
-    p.add_argument("--category", required=True, help="Jira project category (e.g., 'Panda / Craft')")
+    p.add_argument("--category", default="", help="Jira project category (e.g., 'Panda / Craft')")
     p.add_argument("--email", default="", help="Atlassian account email")
     p.add_argument("--token", default="", help="Atlassian API token")
     p.add_argument("--tempo-token", default="", help="Tempo API token (optional: auto-creates Tempo accounts)")
     p.add_argument("--customer-key", default="", help="Tempo customer key / Fichenbak clientId (e.g. 'SUI'). Defaults to first 6 chars of project key.")
     p.add_argument("--no-tempo", action="store_true", help="Jira only: skip Tempo even if TEMPO_API_TOKEN is set (PM creates accounts manually)")
     p.add_argument("--skip-workflow", action="store_true", help="Keep Jira's generated Kanban workflow (issues start in Backlog) instead of INTSTA's")
+    p.add_argument("--productive-budget", type=int, default=0, metavar="ID",
+                   help="Productive budget (deal) id. Creates the Voortraject + "
+                        "Implementatie epics with it, and stamps any issue already "
+                        "in the project. Re-run later to backfill.")
+    p.add_argument("--budget-only", action="store_true",
+                   help="Backfill mode: skip provisioning, only apply "
+                        "--productive-budget to an existing project")
     p.add_argument("--dry-run", action="store_true", help="Validate without creating")
     args = p.parse_args()
+
+    if args.budget_only:
+        if not args.productive_budget:
+            p.error("--budget-only requires --productive-budget")
+        sys.exit(0 if backfill_budget(
+            key=args.key.upper(), pm_email=args.pm_email,
+            budget_id=args.productive_budget,
+            at_email=args.email, at_token=args.token,
+            dry_run=args.dry_run) else 1)
+
+    if not args.name or not args.category:
+        p.error("name and --category are required (omit them only with --budget-only)")
 
     ok = provision(
         key=args.key.upper(), name=args.name,
@@ -561,6 +788,7 @@ if __name__ == "__main__":
         at_email=args.email, at_token=args.token,
         tempo_token=args.tempo_token, customer_key=args.customer_key,
         no_tempo=args.no_tempo, skip_workflow=args.skip_workflow,
+        productive_budget=args.productive_budget,
         dry_run=args.dry_run,
     )
     sys.exit(0 if ok else 1)

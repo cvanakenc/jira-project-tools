@@ -33,9 +33,28 @@ python3 tools/provision.py SHICLA "The Belgian Alliance for Climate Action" \
 2. Looks up project category by name
 3. Fetches INTSTA permission + notification schemes
 4. Creates company-managed Kanban project
-5. Applies INTSTA schemes
+5. Applies INTSTA schemes + adds the "Productive Budget" field to the project's screens
 6. Sets category
 7. Verifies everything
+8. With `--productive-budget <id>`: creates the Voortraject + Implementatie epics
+   carrying that budget, and stamps any issue already in the project
+
+### Productive budget
+
+`--productive-budget` takes the numeric Productive **budget (deal) id** — the one in
+`app.productive.io/55588-the-kind-kids/projects/<project>/budgets/<id>`. Do not use the
+`?filter=` query param on the budgets list; that is a base64 filter id, not a budget id,
+and the Jira field will fail to resolve a name from it.
+
+The budget usually only exists after provisioning, so `--budget-only` backfills an
+existing project: it puts the field on the screens, creates whichever of the two epics
+are missing, and stamps every issue. Safe to re-run.
+
+```bash
+python3 tools/provision.py TIGWEB \
+  --pm-email "eva.boelen@statik.be" \
+  --budget-only --productive-budget 4152761
+```
 
 **What it asks YOU to do (Phase 2 — Tempo):**
 - Explicitly lists every manual step with URLs, customer key, and account naming
