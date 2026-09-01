@@ -1,6 +1,6 @@
 # Jira Project Tools
 
-Deterministic scripts for managing Jira projects — provision and archive — following The Kind Kids' Handbook (Confluence).
+Deterministic scripts for managing Jira projects and users — provision, archive, onboard — following The Kind Kids' Handbook (Confluence).
 
 ## Scripts
 
@@ -8,6 +8,7 @@ Deterministic scripts for managing Jira projects — provision and archive — f
 |--------|-------------|
 | `tools/provision.py` | Full project setup: creates Kanban project, copies INTSTA schemes, sets category + lead, and (optionally) creates Tempo accounts + sets default |
 | `tools/close_project.py` | Archive a project: checks unresolved issues, applies `Archived Scheme / STATIK`, verifies |
+| `tools/onboard_user.py` | Invite a user and enforce the standard group set (`jira-software-users` + `confluence-users` + `team-statik` + `team-<animal>`); `--audit` finds anyone missing `team-statik` |
 
 ## Prerequisites
 
@@ -75,6 +76,43 @@ python3 tools/close_project.py SHICLA
 python3 tools/close_project.py SHICLA --dry-run
 python3 tools/close_project.py SHICLA --force  # skip unresolved-issues check
 ```
+
+### Onboard a user
+
+```bash
+python3 tools/onboard_user.py zias@thekind.kids --team rhino
+python3 tools/onboard_user.py zias@thekind.kids --team rhino --tempo-admin
+python3 tools/onboard_user.py zias@thekind.kids --no-create   # fix groups only
+```
+
+Creates the user if needed (sends the Atlassian invite), then adds whatever is
+missing from the standard set. Safe to re-run — groups the user already has are
+skipped, and a duplicate add is treated as success.
+
+**`team-statik` is the one that matters.** It grants `BROWSE_PROJECTS` on
+Statik's default permission scheme; the "Interne medewerkers" project role does
+not. A user without it looks fully provisioned but opens Jira to nothing, so the
+script always adds it rather than making it a flag.
+
+Two things the API cannot do: `displayName` can't be set (the user picks it when
+accepting the invite, or an org admin sets it at admin.atlassian.com), and a
+pending account can't be reactivated with a Jira token. Group membership alone
+does not activate a licence.
+
+#### Audit
+
+```bash
+python3 tools/onboard_user.py --audit        # report gaps
+python3 tools/onboard_user.py --audit --fix  # add them to team-statik
+```
+
+"Internal" is derived from `team-<animal>` membership rather than email domain —
+`jira-software-users` also holds app/bot accounts and external customer users,
+and most accounts hide their email address.
+
+`team-shavedmonkey` members are listed separately under "review manually" and
+left alone by `--fix`: it's a different legal entity, so withholding Statik
+project access may be deliberate. Use `--all-teams` to treat them as gaps too.
 
 ## Full checklist after provision
 
