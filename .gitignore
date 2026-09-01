@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 .env
 .DS_Store
+
+# Scratch API response dumps / exported data
+*.json
