@@ -9,6 +9,7 @@ Deterministic scripts for managing Jira projects and users — provision, archiv
 | `tools/provision.py` | Full project setup: creates Kanban project, copies INTSTA schemes, sets category + lead, and (optionally) creates Tempo accounts + sets default |
 | `tools/close_project.py` | Archive a project: checks unresolved issues, applies `Archived Scheme / STATIK`, verifies |
 | `tools/onboard_user.py` | Invite a user and enforce the standard group set (`jira-software-users` + `confluence-users` + `team-statik` + `team-<animal>`); `--audit` finds anyone missing `team-statik` |
+| `tools/offboard_user.py` | Offboard a leaver: inventory what they own, transfer it to a successor, then deactivate; `--audit` is read-only |
 
 ## Prerequisites
 
@@ -113,6 +114,59 @@ and most accounts hide their email address.
 `team-shavedmonkey` members are listed separately under "review manually" and
 left alone by `--fix`: it's a different legal entity, so withholding Statik
 project access may be deliberate. Use `--all-teams` to treat them as gaps too.
+
+### Offboard a user
+
+```bash
+python3 tools/offboard_user.py ben@statik.be --audit              # read-only: what do they own?
+python3 tools/offboard_user.py ben@statik.be --to maarten@statik.be          # dry-run
+python3 tools/offboard_user.py ben@statik.be --to maarten@statik.be --apply  # transfer
+```
+
+**Dry-run is the default here** — the opposite of `onboard_user.py`. One run can
+rewrite hundreds of records (Laurie Tilmant's handover moved 64 Jira leads and
+198 Tempo accounts), so writes need `--apply`.
+
+**Deactivating an account reassigns nothing.** Project leads, Tempo account
+leads, assigned issues and owned filters all keep pointing at the dead account,
+so always transfer before deactivating. What gets moved:
+
+| Item | How |
+|---|---|
+| Jira project leads | `PUT /project/{key}` — partial body is fine |
+| Tempo account leads | `PUT /accounts/{key}` — **full** body, flat `leadAccountId`; GET wants the numeric id, PUT wants the string key |
+| Tempo team leads | `PUT /teams/{id}` — full body, flat `leadAccountId` |
+| Open issues | `PUT /issue/{key}/assignee`, or `--unassign` to send them back to the pool |
+| Filters | `PUT /filter/{id}/owner` |
+| Dashboards | **not automated** — Jira has no owner-change API; do it in the UI |
+
+Closed Tempo accounts and archived Jira projects are skipped by default: they're
+historical buckets, so moving their lead is audit churn with no operational
+effect. `--include-closed` widens the sweep.
+
+**Watch for filters that drive boards.** A board whose filter is owned by a
+deactivated user is the failure mode worth avoiding — `--map-boards` reports
+which boards depend on the leaver's filters. It scans every board, so it takes a
+couple of minutes and is opt-in.
+
+Already-deactivated accounts are invisible to `user/search`, which is exactly
+the population you offboard. The script falls back to scanning group membership
+with `includeInactiveUsers`; if the email is hidden too, pass `--account-id`.
+
+#### Deactivation needs a different credential
+
+The final flip is an org-level action. A Jira API token gets `HTTP 401` against
+the org admin API, so by default the script prints the manual steps
+(admin.atlassian.com → Directory → Users → Deactivate access). To automate it,
+create an **org admin API key** at admin.atlassian.com → Settings → API keys:
+
+```bash
+export ATLASSIAN_ORG_API_KEY="..."
+python3 tools/offboard_user.py ben@statik.be --to maarten@statik.be --deactivate --apply
+```
+
+Without that key the script will not claim the person is offboarded — it says
+the account is still active.
 
 ## Full checklist after provision
 
