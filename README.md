@@ -6,7 +6,7 @@ Deterministic scripts for managing Jira projects and users — provision, archiv
 
 | Script | What it does |
 |--------|-------------|
-| `tools/provision.py` | Full project setup: creates Kanban project, copies INTSTA schemes, sets category + lead, and (optionally) creates Tempo accounts + sets default |
+| `tools/provision.py` | Full project setup: creates Kanban project, copies INTSTA schemes, sets category + lead. Tempo is opt-in (`--tempo`) and retired |
 | `tools/close_project.py` | Archive a project: checks unresolved issues, applies `Archived Scheme / STATIK`, verifies |
 | `tools/onboard_user.py` | Invite a user and enforce the standard group set (`jira-software-users` + `confluence-users` + `team-statik` + `team-<animal>`); `--audit` finds anyone missing `team-statik` |
 | `tools/offboard_user.py` | Offboard a leaver: inventory what they own, transfer it to a successor, then deactivate; `--audit` is read-only |
@@ -58,17 +58,29 @@ python3 tools/provision.py TIGWEB \
   --budget-only --productive-budget 4152761
 ```
 
-**What it asks YOU to do (Phase 2 — Tempo):**
-- Explicitly lists every manual step with URLs, customer key, and account naming
-- If `--tempo-token` is provided, auto-creates Voortraject + Implementatie accounts and sets the default
+### Tempo (retired — opt-in)
+
+Statik no longer uses Tempo; time tracking lives in Productive. The script
+therefore **never touches Tempo unless you ask it to**, even though
+`~/.statik-jira-creds` always exports `TEMPO_API_TOKEN` — an exported token is
+not intent. Pass `--tempo` (or an explicit `--tempo-token`) to opt in to the old
+flow, which creates the Voortraject + Implementatie accounts.
 
 ```bash
-# With Tempo auto-creation:
+# Opt in to the retired Tempo flow:
 python3 tools/provision.py SHICLA "The Belgian Alliance for Climate Action" \
   --pm-email "lore@statik.be" \
   --category "Panda / Craft" \
-  --tempo-token "t8r8y9Ql..."
+  --tempo --customer-key SUI
 ```
+
+`--no-tempo` is now a deprecated no-op: skipping Tempo is the default.
+
+> Known bug in that path: the "Default account set" step writes a Jira project
+> property `tempo-accounts-default-account-id` that Tempo never reads — real
+> links live at `POST /4/account-links` (scope `PROJECT`). It reports success
+> either way. Also, Tempo v4 addresses accounts by numeric **id** on GET but by
+> **key** on DELETE.
 
 ### Close a project
 
@@ -173,9 +185,6 @@ the account is still active.
 ```
 [ ] Strategist: project exists in Fichenbak + Google Sheet
 [ ] Slack: notified #nieuweprojecten
-[ ] Leen/Luk: Tempo Customer created
-[ ] PM: Tempo Accounts created (Voortraject + Implementatie)
-[ ] PM: Default Account set in Jira Project Settings
 [ ] PM: Epics created + Automation run
 [ ] Strategist: PO, GL, max budget filled in Fichenbak
 [ ] PM: notify strategist that Jira is ready

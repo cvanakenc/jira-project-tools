@@ -6,8 +6,10 @@ Full project setup following The Kind Kids' Handbook:
   - Creates the Kanban project
   - Shares settings from INTSTA
   - Sets category and lead
-  - (Optionally) creates Tempo accounts and sets default
   - Explicitly tells you what to do next
+
+Tempo is OPT-IN (--tempo). Statik retired Tempo; time tracking lives in
+Productive. An exported TEMPO_API_TOKEN alone will not create accounts.
 
 Usage:
     python3 provision.py SHICLA "The Belgian Alliance" \\
@@ -15,7 +17,7 @@ Usage:
 
     python3 provision.py SHICLA "The Belgian Alliance" \\
         --pm-email "lore@statik.be" --category "Panda / Craft" \\
-        --tempo-token "t8r8y9Ql..."   # auto-creates Tempo accounts too
+        --tempo                       # opt in to the retired Tempo flow
 
     python3 provision.py SHICLA "The Belgian Alliance" \\
         --pm-email "lore@statik.be" --category "Panda / Craft" \\
@@ -539,14 +541,29 @@ def backfill_budget(key: str, pm_email: str, budget_id: int,
 def provision(key: str, name: str, pm_email: str, category: str,
               at_email: str = "", at_token: str = "",
               tempo_token: str = "", customer_key: str = "",
-              no_tempo: bool = False, skip_workflow: bool = False,
+              use_tempo: bool = False, no_tempo: bool = False,
+              skip_workflow: bool = False,
               productive_budget: int = 0, dry_run: bool = False) -> bool:
 
     at_email = at_email or os.environ.get("ATLASSIAN_EMAIL", "")
     at_token = at_token or os.environ.get("ATLASSIAN_API_TOKEN", "")
-    # --no-tempo forces a Jira-only run even when TEMPO_API_TOKEN is exported
-    # (the creds file always exports it, so env presence != intent to use it).
-    tempo_token = "" if no_tempo else (tempo_token or os.environ.get("TEMPO_API_TOKEN", ""))
+    # Tempo is OPT-IN. Statik retired Tempo, and ~/.statik-jira-creds always
+    # exports TEMPO_API_TOKEN, so the presence of that env var is NOT intent to
+    # use it. Accounts are created only when --tempo or an explicit
+    # --tempo-token asks for them. (A provisioning run on 2026-09-11 silently
+    # created two live Tempo accounts under the wrong customer this way.)
+    if no_tempo:
+        tempo_token = ""
+    elif tempo_token:
+        pass                    # explicit --tempo-token is itself the opt-in
+    elif use_tempo:
+        tempo_token = os.environ.get("TEMPO_API_TOKEN", "")
+        if not tempo_token:
+            print("❌ --tempo given but no TEMPO_API_TOKEN set "
+                  "(export it, or pass --tempo-token)")
+            return False
+    else:
+        tempo_token = ""
 
     if not at_email or not at_token:
         print("❌ Set ATLASSIAN_EMAIL and ATLASSIAN_API_TOKEN")
@@ -642,34 +659,14 @@ def provision(key: str, name: str, pm_email: str, category: str,
 
     # ── Phase 2: Tempo accounts │ default │ Epics ─────────────────
 
-    print(f"\n── Phase 2/2: Tempo accounts + issues ──")
-
     if not has_tempo:
-        print(f"\n   ⚠  No TEMPO_API_TOKEN provided — Tempo accounts are MANUAL.")
-        print()
-        print("   📋 YOU MUST COMPLETE THESE MANUAL STEPS NOW:")
-        print()
-        print(f"      ▸ Customer key: {customer_key}")
-        print(f"      ▸ Project key:  {key}")
-        print()
-        print(f"      [ ] 1. Luk/Leen: Tempo → Accounts → Customers")
-        print(f"              Create customer '{customer_key}' if new")
-        print(f"              https://statik.atlassian.net/plugins/servlet/ac/io.tempo.jira/tempo-app#!/accounts/customers")
-        print()
-        print(f"      [ ] 2. PM: Fichenbak → project sheet → Facturatie")
-        print(f"              Click 'Account toevoegen +'")
-        print(f"              Create: Voortraject (key={key}VTJ), category=Volgens Offerte")
-        print(f"              Create: Implementatie (key={key}IMP), category=Volgens Offerte")
-        print(f"              https://fichenbak.statik.be/")
-        print()
-        print(f"      [ ] 3. PM: Jira → {key} → Project Settings → Apps → Accounts")
-        print(f"              Click 'Set Default' on the primary account")
-        print()
-        print(f"   ════════════════════════════════════════════════════════")
-        print(f"   💡 TIP: re-run with --tempo-token to automate steps 2-3")
-        print(f"   ════════════════════════════════════════════════════════")
+        print(f"\n── Phase 2/2: Tempo ──\n")
+        print(f"   ⏭  Tempo skipped (opt-in). Statik no longer uses Tempo;")
+        print(f"      time tracking lives in Productive.")
+        print(f"      Need the old flow anyway? Re-run with --tempo.")
 
     else:
+        print(f"\n── Phase 2/2: Tempo accounts + issues ──")
         print(f"\n      Tempo token detected — auto-creating accounts...\n")
 
         # Find Tempo account category KEY ("Volgens Offerte" → "VOF")
@@ -707,15 +704,16 @@ def provision(key: str, name: str, pm_email: str, category: str,
         elif not dry_run:
             warn("No accounts created — default account not set")
 
-    # ── Epics reminder ─────────────────────────────────────────────
+    # ── Epics reminder (Tempo flow only) ───────────────────────────
 
-    print(f"\n   📋 AFTER all accounts exist:")
-    print(f"      [ ] Create Epic 'Voortraject' in {key}")
-    print(f"            Summary=Voortraject | Epic Name=Voortraject")
-    print(f"            Account=Voortraject | Assignee=PM | Reporter=PM")
-    print(f"            Run: 'Create Voortraject Tasks' automation")
-    print(f"      [ ] Create Epic 'Implementatie' in {key}  (same pattern)")
-    print(f"      [ ] Use Bulk Changes if needed for assignee/reporter/watchers")
+    if has_tempo:
+        print(f"\n   📋 AFTER all accounts exist:")
+        print(f"      [ ] Create Epic 'Voortraject' in {key}")
+        print(f"            Summary=Voortraject | Epic Name=Voortraject")
+        print(f"            Account=Voortraject | Assignee=PM | Reporter=PM")
+        print(f"            Run: 'Create Voortraject Tasks' automation")
+        print(f"      [ ] Create Epic 'Implementatie' in {key}  (same pattern)")
+        print(f"      [ ] Use Bulk Changes if needed for assignee/reporter/watchers")
 
     # ── Final checklist ────────────────────────────────────────────
 
@@ -724,9 +722,10 @@ def provision(key: str, name: str, pm_email: str, category: str,
     print(f"\n   FULL POST-PROVISION CHECKLIST:")
     print(f"   [ ] Strategist: project exists in Fichenbak + Google Sheet")
     print(f"   [ ] Slack: notified #nieuweprojecten")
-    print(f"   [ ] Leen/Luk: Tempo Customer created (key={customer_key})")
-    print(f"   [ ] PM: Tempo Accounts created (Voortraject + Implementatie)")
-    print(f"   [ ] PM: Default Account set in Jira Project Settings")
+    if has_tempo:
+        print(f"   [ ] Leen/Luk: Tempo Customer created (key={customer_key})")
+        print(f"   [ ] PM: Tempo Accounts created (Voortraject + Implementatie)")
+        print(f"   [ ] PM: Default Account set in Jira Project Settings")
     print(f"   [ ] PM: Epics created + Automation run")
     print(f"   [ ] Strategist: PO, GL, max budget filled in Fichenbak")
     print(f"   [ ] PM: notify strategist that Jira is ready")
@@ -746,7 +745,7 @@ if __name__ == "__main__":
 
           %(prog)s WIEWEB "Website immaterieelerfgoed" \\
               --pm-email "lore@statik.be" --category "Koala / Craft" \\
-              --tempo-token "t8r8y9Ql6E..."
+              --tempo          # opt in: also create Tempo accounts
         """),
     )
     p.add_argument("key", help="Project key (e.g., SHICLA)")
@@ -756,9 +755,14 @@ if __name__ == "__main__":
     p.add_argument("--category", default="", help="Jira project category (e.g., 'Panda / Craft')")
     p.add_argument("--email", default="", help="Atlassian account email")
     p.add_argument("--token", default="", help="Atlassian API token")
-    p.add_argument("--tempo-token", default="", help="Tempo API token (optional: auto-creates Tempo accounts)")
+    p.add_argument("--tempo", action="store_true",
+                   help="Opt in to the retired Tempo flow: create Voortraject + "
+                        "Implementatie accounts. Off by default — an exported "
+                        "TEMPO_API_TOKEN alone will NOT trigger it.")
+    p.add_argument("--tempo-token", default="", help="Tempo API token (implies --tempo)")
     p.add_argument("--customer-key", default="", help="Tempo customer key / Fichenbak clientId (e.g. 'SUI'). Defaults to first 6 chars of project key.")
-    p.add_argument("--no-tempo", action="store_true", help="Jira only: skip Tempo even if TEMPO_API_TOKEN is set (PM creates accounts manually)")
+    p.add_argument("--no-tempo", action="store_true",
+                   help="Deprecated no-op: skipping Tempo is now the default.")
     p.add_argument("--skip-workflow", action="store_true", help="Keep Jira's generated Kanban workflow (issues start in Backlog) instead of INTSTA's")
     p.add_argument("--productive-budget", type=int, default=0, metavar="ID",
                    help="Productive budget (deal) id. Creates the Voortraject + "
@@ -787,7 +791,8 @@ if __name__ == "__main__":
         pm_email=args.pm_email, category=args.category,
         at_email=args.email, at_token=args.token,
         tempo_token=args.tempo_token, customer_key=args.customer_key,
-        no_tempo=args.no_tempo, skip_workflow=args.skip_workflow,
+        use_tempo=args.tempo, no_tempo=args.no_tempo,
+        skip_workflow=args.skip_workflow,
         productive_budget=args.productive_budget,
         dry_run=args.dry_run,
     )
